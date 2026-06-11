@@ -1,0 +1,14 @@
+# Archivos temporales de SQLite
+*.db-wal
+*.db-shm
+
+# Logs del scraper
+scraper.log
+
+# Caché de Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Variables de entorno (por si en el futuro agregás claves API)
+.env
