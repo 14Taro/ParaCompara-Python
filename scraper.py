@@ -85,9 +85,17 @@ VTEX_LEGACY = {
     "exito": {
         "nombre":   "Éxito",
         "search":   "https://www.exito.com/api/catalog_system/pub/products/search/",
-        "categorias": ["Despensa", "Lacteos Huevos", "Carnes Pescados",
-                       "Frutas Verduras", "Bebidas", "Panaderia",
-                       "Aseo Hogar", "Cuidado Personal"],
+        "categorias": [
+            # Categorías amplias
+            "Despensa", "Lacteos", "Carnes", "Frutas", "Verduras",
+            "Bebidas", "Pan", "Aseo", "Cuidado Personal",
+            # Productos específicos de alta rotación
+            "leche", "arroz", "aceite", "huevos", "pollo", "carne",
+            "yogur", "queso", "mantequilla", "jugo", "agua", "cafe",
+            "pasta", "azucar", "sal", "atun", "jabon", "shampoo",
+            "detergente", "papel higienico", "servilletas", "galleta",
+            "avena", "frijol", "lentejas", "harina maiz", "gaseosa",
+        ],
     },
     "olimpica": {
         "nombre":   "Olímpica",
@@ -128,7 +136,7 @@ PLAYWRIGHT_STORES = {
         "item_sel":   "[class*='product-card']",
         "name_sel":   "h3[class*='prod__name']",
         "price_sel":  "p[class*='base__price']",
-        "wait_ms":    8000,   # D1 usa Next.js, necesita tiempo para renderizar
+        "wait_ms":    6000,   # D1 usa Next.js, necesita tiempo para renderizar
     },
 }
 
@@ -353,33 +361,6 @@ EXCLUIR = [
     "pilas ", "batería aa", "encendedor", "vela ", "veladora",
     "flores ", "planta ", "maceta", "abono ", "insecticida",
     "raticida", "trampa raton",
-
-    # Vajilla y utensilios de mesa (D1 vende estos)
-    "vajilla", "juego de platos", "juego platos", "set platos",
-    "set de vasos", "juego vasos", "copa ", "copas ",
-    "cuchillería", "cuchilleria", "cubiertos", "set cubiertos",
-    "delantal", "mantel ", "individual de mesa", "porta vasos",
-    "tabla de picar", "tabla picar", "exprimidor", "pelador ",
-    "rallador", "escurridor", "colador ", "embudo ", "mezclador",
-
-    # Ropa de cama y baño (D1 vende estos)
-    "juego de cama", "juego cama", "sabanas", "sábanas",
-    "funda ", "edredón", "edredon", "cobertor", "protector cama",
-    "toalla ", "toallas ", "bata de baño", "tapete baño",
-
-    # Artículos de limpieza no consumibles
-    "escoba ", "trapeador", "recogedor", "balde ", "cubo ",
-    "cepillo limpieza", "esponja metalica", "limpiavidrios",
-    "dispensador jabon", "porta jabon",
-
-    # Productos de temporada / bazar que D1 vende ocasionalmente
-    "set bbq", "bbq ", "asador ", "parrilla ",
-    "kit de playa", "sombrilla playa", "inflable ",
-    "decoración", "decoracion", "adorno ", "marco foto",
-    "portarretrato", "cojín", "cojin ", "puff ",
-    "organizador ", "canasta ", "canasto ",
-    "bolsa viaje", "neceser ", "maletín", "maletin ",
-    "kit escolar", "lonchera", "cartuchera",
 ]
 
 MARCAS_CONOCIDAS = [
@@ -611,13 +592,30 @@ def registrar_nuevo(nombre_raw: str, marca_api: str,
 # ══════════════════════════════════════════════════════════════════════
 #  VTEX LEGACY — Éxito, Olímpica
 # ══════════════════════════════════════════════════════════════════════
-def vtex_legacy_pagina(url: str, query: str, desde: int) -> list[dict]:
+def vtex_legacy_pagina(url: str, query: str, desde: int,
+                        _intentos: int = 0) -> list[dict]:
+    """
+    Consulta el endpoint VTEX legacy. Si la respuesta está vacía o no es JSON
+    (rate limiting), espera y reintenta hasta 2 veces. Si falla las 3 veces,
+    devuelve [] sin seguir reintentando.
+    """
+    MAX_REINTENTOS = 2
     try:
         r = requests.get(url, headers=HEADERS_JSON, params={
             "ft": query, "_from": desde, "_to": desde + PAGE_SIZE - 1,
-        }, timeout=20)
+        }, timeout=25)
         if r.status_code not in (200, 206):
             log.warning(f"  VTEX legacy HTTP {r.status_code} para '{query}'")
+            return []
+        # Verificar que la respuesta es JSON antes de parsear
+        content = r.text.strip()
+        if not content or content[0] not in ('[', '{'):
+            if _intentos < MAX_REINTENTOS:
+                espera = 30 * (_intentos + 1)  # 30s, 60s
+                log.warning(f"  VTEX legacy respuesta vacía para '{query}' — esperando {espera}s")
+                time.sleep(espera)
+                return vtex_legacy_pagina(url, query, desde, _intentos + 1)
+            log.warning(f"  VTEX legacy sin respuesta válida tras {MAX_REINTENTOS+1} intentos: '{query}'")
             return []
         items = []
         for prod in (r.json() or []):
@@ -636,7 +634,12 @@ def vtex_legacy_pagina(url: str, query: str, desde: int) -> list[dict]:
                 items.append({"nombre": nombre, "marca": marca, "precio": precio})
         return items
     except Exception as exc:
-        log.warning(f"  VTEX legacy error: {exc}")
+        if _intentos < MAX_REINTENTOS:
+            espera = 30 * (_intentos + 1)
+            log.warning(f"  VTEX legacy error: {exc} — reintentando en {espera}s")
+            time.sleep(espera)
+            return vtex_legacy_pagina(url, query, desde, _intentos + 1)
+        log.warning(f"  VTEX legacy error definitivo para '{query}': {exc}")
         return []
 
 
@@ -795,27 +798,30 @@ def scrape_playwright(tienda_id: str, productos: list[dict],
             log.info(f"  URL: {cat_url}")
             num_pag = 1
             while True:
-                url = f"{cat_url}?pagina={num_pag}" if num_pag > 1 else cat_url
+                # D1 usa ?currentPage=N para paginación
+                url = f"{cat_url}?currentPage={num_pag}" if num_pag > 1 else cat_url
+                log.info(f"    Página {num_pag}: {url}")
                 try:
                     page.goto(url, wait_until="domcontentloaded", timeout=40_000)
                 except PWTimeout:
                     log.warning(f"  Timeout en {url}")
                     break
 
-                # Scroll para activar lazy loading (especialmente necesario en D1/Next.js)
-                for _ in range(3):
-                    page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                    page.wait_for_timeout(1500)
-                page.evaluate("window.scrollTo(0, 0)")
+                # Esperar a que carguen los productos
                 page.wait_for_timeout(cfg["wait_ms"])
+                # Scroll para activar lazy loading dentro de la página
+                page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                page.wait_for_timeout(2000)
+                page.evaluate("window.scrollTo(0, 0)")
 
-                soup  = BeautifulSoup(page.content(), "html.parser")
+                soup       = BeautifulSoup(page.content(), "html.parser")
                 items_html = soup.select(cfg["item_sel"])
+
                 if not items_html:
-                    log.debug(f"  No items con selector '{cfg['item_sel'][:40]}' en {url}")
+                    log.info(f"    → Sin productos en página {num_pag}, fin de categoría")
                     break
 
-                log.debug(f"  Página {num_pag}: {len(items_html)} items")
+                log.info(f"    → {len(items_html)} productos en página {num_pag}")
                 for item in items_html:
                     nt = item.select_one(cfg["name_sel"])
                     pt = item.select_one(cfg["price_sel"])
@@ -835,12 +841,8 @@ def scrape_playwright(tienda_id: str, productos: list[dict],
                             precios[pid] = precio
                             nuevos += 1
 
-                # ¿Hay siguiente página?
-                sig = soup.select_one(
-                    "a[rel='next'], .pagination__next:not(.disabled), "
-                    "[aria-label='Siguiente página'], a[data-page]"
-                )
-                if not sig:
+                # Si devolvió menos de 20 productos, es la última página
+                if len(items_html) < 20:
                     break
                 num_pag += 1
                 pausa()
@@ -867,26 +869,44 @@ def scrape_only_prices(tienda_id: str, productos: list[dict]) -> dict[int, int]:
         cfg    = VTEX_LEGACY[tienda_id]
         search = cfg["search"]
         log.info(f"▶ {cfg['nombre']} (only-prices, VTEX legacy)")
+        errores_consec = 0
         for prod in productos:
+            if errores_consec >= 5:
+                log.warning(f"  ⚠ {cfg['nombre']}: 5 errores consecutivos, pausando 2 min")
+                time.sleep(120)
+                errores_consec = 0
             query = f"{prod.get('marca','')} {prod['nombre'].split()[0]}".strip()
             items = vtex_legacy_pagina(search, query, 0)
-            for it in items[:10]:
-                if score_match(prod, it["nombre"], it["precio"]) >= 45:
-                    precios[prod["id"]] = it["precio"]
-                    break
+            if items:
+                errores_consec = 0
+                for it in items[:10]:
+                    if score_match(prod, it["nombre"], it["precio"]) >= 45:
+                        precios[prod["id"]] = it["precio"]
+                        break
+            else:
+                errores_consec += 1
             pausa(0.5)
 
     elif tienda_id in VTEX_IS:
         cfg    = VTEX_IS[tienda_id]
         search = cfg["search"]
         log.info(f"▶ {cfg['nombre']} (only-prices, VTEX IS)")
+        errores_consec = 0
         for prod in productos:
+            if errores_consec >= 5:
+                log.warning(f"  ⚠ {cfg['nombre']}: 5 errores consecutivos, pausando 2 min")
+                time.sleep(120)
+                errores_consec = 0
             query = f"{prod.get('marca','')} {prod['nombre'].split()[0]}".strip()
             items = vtex_is_pagina(search, query, 1)
-            for it in items[:10]:
-                if score_match(prod, it["nombre"], it["precio"]) >= 45:
-                    precios[prod["id"]] = it["precio"]
-                    break
+            if items:
+                errores_consec = 0
+                for it in items[:10]:
+                    if score_match(prod, it["nombre"], it["precio"]) >= 45:
+                        precios[prod["id"]] = it["precio"]
+                        break
+            else:
+                errores_consec += 1
             pausa(0.5)
 
     elif tienda_id in PLAYWRIGHT_STORES:
@@ -911,39 +931,46 @@ def scrape_only_prices(tienda_id: str, productos: list[dict]) -> dict[int, int]:
 
             for cat_url in cfg["categorias_url"]:
                 log.info(f"  Categoría: {cat_url.split('/')[-1]}")
-                try:
-                    page.goto(cat_url, wait_until="domcontentloaded", timeout=40_000)
-                    # Scroll múltiple para cargar todos los productos
-                    for _ in range(3):
+                num_pag = 1
+                while True:
+                    url = f"{cat_url}?currentPage={num_pag}" if num_pag > 1 else cat_url
+                    try:
+                        page.goto(url, wait_until="domcontentloaded", timeout=40_000)
+                        page.wait_for_timeout(cfg["wait_ms"])
                         page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                        page.wait_for_timeout(1500)
-                    page.wait_for_timeout(cfg["wait_ms"])
-                except PWTimeout:
-                    log.warning(f"  Timeout en {cat_url}")
-                    continue
+                        page.wait_for_timeout(2000)
+                        page.evaluate("window.scrollTo(0, 0)")
+                    except PWTimeout:
+                        log.warning(f"  Timeout en {url}")
+                        break
 
-                soup  = BeautifulSoup(page.content(), "html.parser")
-                items_html = soup.select(cfg["item_sel"])
-                log.info(f"  → {len(items_html)} productos encontrados")
+                    soup       = BeautifulSoup(page.content(), "html.parser")
+                    items_html = soup.select(cfg["item_sel"])
+                    if not items_html:
+                        break
 
-                for item in items_html:
-                    nt = item.select_one(cfg["name_sel"])
-                    pt = item.select_one(cfg["price_sel"])
-                    if not nt or not pt:
-                        continue
-                    nombre_scrap = nt.get_text(strip=True)
-                    precio = limpiar_precio(pt.get("content") or pt.get_text())
-                    if not precio:
-                        continue
-                    # Buscar qué producto de la BD corresponde
-                    for prod in productos:
-                        if prod["id"] in precios:
+                    log.info(f"  → {len(items_html)} productos en página {num_pag}")
+                    for item in items_html:
+                        nt = item.select_one(cfg["name_sel"])
+                        pt = item.select_one(cfg["price_sel"])
+                        if not nt or not pt:
                             continue
-                        if score_match(prod, nombre_scrap, precio) >= 45:
-                            precios[prod["id"]] = precio
-                            log.info(f"  ✓ {prod['nombre']:<35} → ${precio:,}")
-                            break
+                        nombre_scrap = nt.get_text(strip=True)
+                        precio = limpiar_precio(pt.get("content") or pt.get_text())
+                        if not precio:
+                            continue
+                        for prod in productos:
+                            if prod["id"] in precios:
+                                continue
+                            if score_match(prod, nombre_scrap, precio) >= 45:
+                                precios[prod["id"]] = precio
+                                log.info(f"  ✓ {prod['nombre']:<35} → ${precio:,}")
+                                break
 
+                    if len(items_html) < 20:
+                        break
+                    num_pag += 1
+                    pausa()
                 pausa()
 
             browser.close()
@@ -956,15 +983,29 @@ def scrape_only_prices(tienda_id: str, productos: list[dict]) -> dict[int, int]:
 #  GUARDAR EN BD
 # ══════════════════════════════════════════════════════════════════════
 def guardar(tienda_id: str, precios: dict[int, int]):
-    hoy = date.today().isoformat()
-    ok  = 0
+    """Guarda precios filtrando outliers vs historial propio y otras tiendas."""
+    from database import get_connection as _gc
+    hoy  = date.today().isoformat()
+    ok   = 0
+    rech = 0
+    conn = _gc()
     for pid, precio in precios.items():
+        # Validar vs historial propio de este producto/tienda
+        hist = conn.execute(
+            "SELECT AVG(precio) as a FROM precios WHERE producto_id=? AND tienda_id=? AND fecha<?",
+            (pid, tienda_id, hoy)
+        ).fetchone()["a"]
+        if hist and (precio > hist * 4.0 or precio < hist * 0.25):
+            log.warning(f"  ✗ Precio rechazado prod {pid} {tienda_id}: ${precio:,} (hist=${int(hist):,})")
+            rech += 1
+            continue
         try:
             insertar_precio(pid, tienda_id, precio, hoy)
             ok += 1
         except Exception as exc:
             log.error(f"  BD error prod {pid}: {exc}")
-    log.info(f"  ✔ {ok} precios guardados → '{tienda_id}'")
+    conn.close()
+    log.info(f"  ✔ {ok} precios guardados, {rech} rechazados → '{tienda_id}'")
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -1042,52 +1083,25 @@ def run_test(tienda_id: str, query: str):
     else:
         from playwright.sync_api import sync_playwright
         cfg = PLAYWRIGHT_STORES[tienda_id]
-
-        # Buscar la categoría que más coincida con el query
-        # El buscador /se/ de D1 no es confiable — usamos las URLs de categoría
-        query_norm = query.lower().strip()
-        cat_map = {
-            "leche": 0, "lacteo": 0, "yogur": 0, "queso": 0,
-            "congelado": 1, "helado": 1,
-            "arroz": 2, "aceite": 2, "pasta": 2, "azucar": 2, "despensa": 2,
-            "aseo hogar": 3, "detergente": 3, "desinfectante": 3,
-            "shampoo": 4, "jabon": 4, "personal": 4, "cuidado": 4,
-            "bebida": 5, "gaseosa": 5, "agua": 5, "jugo": 5,
-        }
-        cat_idx = 2  # default: alimentos y despensa
-        for kw, idx in cat_map.items():
-            if kw in query_norm:
-                cat_idx = idx
-                break
-        url = cfg["categorias_url"][min(cat_idx, len(cfg["categorias_url"])-1)]
-        print(f"  Abriendo categoría: {url}…")
+        url = cfg["search_url"].format(query=query.replace(" ", "+"))
+        print(f"  Abriendo {url}…")
         with sync_playwright() as pw:
-            br  = pw.chromium.launch(headless=True,
-                  args=["--no-sandbox","--disable-dev-shm-usage"])
-            ctx = br.new_context(
-                user_agent=HEADERS_HTML["User-Agent"],
-                locale="es-CO", timezone_id="America/Bogota",
-                viewport={"width": 1280, "height": 900}
-            )
-            ctx.route("**/*.{png,jpg,jpeg,gif,webp,svg,woff,woff2,ttf}",
-                      lambda r: r.abort())
+            br   = pw.chromium.launch(headless=True)
+            ctx  = br.new_context(user_agent=HEADERS_HTML["User-Agent"])
             page = ctx.new_page()
-            page.goto(url, wait_until="domcontentloaded", timeout=40_000)
-            for _ in range(3):
-                page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                page.wait_for_timeout(1500)
+            page.goto(url, wait_until="domcontentloaded", timeout=35_000)
             page.wait_for_timeout(cfg["wait_ms"])
             soup = BeautifulSoup(page.content(), "html.parser")
             br.close()
         items = []
-        for item in soup.select(cfg["item_sel"])[:30]:
+        for item in soup.select(cfg["item_sel"])[:20]:
             nt = item.select_one(cfg["name_sel"])
             pt = item.select_one(cfg["price_sel"])
             if nt and pt:
                 p = limpiar_precio(pt.get("content") or pt.get_text())
                 if p:
                     items.append({"nombre": nt.get_text(strip=True), "precio": p, "marca": ""})
-        metodo = "Playwright (categoría)"
+        metodo = "Playwright"
 
     print(f"  Método : {metodo}")
     print(f"  Items  : {len(items)}\n")

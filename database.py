@@ -333,10 +333,12 @@ def get_sucursales_cercanas(tienda_id: str, lat: float, lng: float, top: int = 3
 
 def buscar_productos(query: str) -> list[dict]:
     """
-    Devuelve productos que coincidan con la búsqueda, ordenados por relevancia:
-    1. Nombre empieza exactamente con el query (ej: 'leche' → 'Leche Entera 1L')
+    Devuelve productos ordenados por relevancia:
+    1. Nombre empieza con el query  → prioridad máxima
     2. Clave empieza con el query
-    3. El resto que contiene el query en cualquier parte
+    3. Nombre contiene el query
+    4. Match en marca/categoría     → prioridad mínima
+    Dentro de cada nivel, prioriza el producto con más tiendas con precio.
     """
     q_exact = query.strip().lower()
     q_like  = f"%{q_exact}%"
@@ -347,8 +349,11 @@ def buscar_productos(query: str) -> list[dict]:
                CASE
                  WHEN LOWER(p.nombre) LIKE ? THEN 1
                  WHEN LOWER(p.clave)  LIKE ? THEN 2
-                 ELSE 3
-               END AS relevancia
+                 WHEN LOWER(p.nombre) LIKE ? THEN 3
+                 ELSE 4
+               END AS relevancia,
+               (SELECT COUNT(DISTINCT tienda_id) FROM precios
+                WHERE producto_id = p.id) AS n_tiendas
                FROM productos p
                LEFT JOIN marcas     m ON m.id = p.marca_id
                LEFT JOIN categorias c ON c.id = p.categoria_id
@@ -356,8 +361,8 @@ def buscar_productos(query: str) -> list[dict]:
                   OR LOWER(p.nombre)  LIKE ?
                   OR LOWER(m.nombre)  LIKE ?
                   OR LOWER(c.nombre)  LIKE ?
-               ORDER BY relevancia ASC, LENGTH(p.nombre) ASC""",
-            (q_start, q_start, q_like, q_like, q_like, q_like),
+               ORDER BY relevancia ASC, n_tiendas DESC, LENGTH(p.nombre) ASC""",
+            (q_start, q_start, q_like, q_like, q_like, q_like, q_like),
         ).fetchall()]
 
 

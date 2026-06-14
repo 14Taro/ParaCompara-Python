@@ -65,7 +65,22 @@ def api_tiendas():
 @app.route("/api/productos")
 def api_productos():
     prods = get_todos_productos()
-    return jsonify([dict(p) for p in prods])
+    # Agregar n_tiendas a cada producto para que el frontend pueda priorizarlos
+    from database import get_connection
+    conn = get_connection()
+    for p in prods:
+        p = dict(p)
+    result = []
+    for p in prods:
+        pd = dict(p)
+        n = conn.execute(
+            "SELECT COUNT(DISTINCT tienda_id) FROM precios WHERE producto_id=?",
+            (pd["id"],)
+        ).fetchone()[0]
+        pd["n_tiendas"] = n
+        result.append(pd)
+    conn.close()
+    return jsonify(result)
 
 @app.route("/api/sucursales_cercanas")
 def api_sucursales():
@@ -383,6 +398,8 @@ footer strong{color:var(--acc);}
       <button class="btn" onclick="doSearch()">Buscar</button>
     </div>
 
+    <div class="chips" id="sugChips"></div>
+
     <div class="loader" id="searchLoader"><div class="dots"><div class="dot"></div><div class="dot"></div><div class="dot"></div></div><p style="color:var(--mut);font-size:13px;margin-top:12px;">Consultando precios…</p></div>
 
     <div id="searchResult"></div>
@@ -439,6 +456,38 @@ async function init() {
   ]);
   allProds   = prods;
   allTiendas = tiendas;
+  renderSugChips();
+}
+
+function renderSugChips() {
+  // Ordenar por n_tiendas DESC para mostrar primero los que están en más tiendas
+  const sorted = [...allProds].sort((a, b) => (b.n_tiendas || 0) - (a.n_tiendas || 0));
+  const seen = new Set(), chips = [];
+  for (const p of sorted) {
+    if (!seen.has(p.categoria)) {
+      seen.add(p.categoria);
+      // Quitar cantidad y unidad: "Leche Entera 1L" → "Leche Entera"
+      const nombreBase = p.nombre
+        .replace(/\s+\d+[.,]?\d*\s*(kg|g|ml|l|lt|u|und|x\d+|paq).*/i, '')
+        .replace(/\s+x\d+.*/i, '')
+        .trim();
+      chips.push(`<span class="chip" onclick="quickSearch('${p.clave}')">${p.emoji} ${nombreBase}</span>`);
+    }
+    if (chips.length >= 8) break;
+  }
+  document.getElementById('sugChips').innerHTML = chips.join('');
+}
+
+function quickSearch(clave) {
+  const prod = allProds.find(p => p.clave === clave);
+  if (!prod) return;
+  // Nombre base sin cantidad para la búsqueda
+  const nombreBase = prod.nombre
+    .replace(/\s+\d+[\.,]?\d*\s*(kg|g|ml|l|lt|u|und|x\d+|paq).*/i, '')
+    .replace(/\s+x\d+.*/i, '')
+    .trim();
+  document.getElementById('searchInput').value = nombreBase;
+  doSearch();
 }
 
 // ── TABS ──────────────────────────────────────────────────────────
@@ -611,12 +660,17 @@ function calcYAxis(hist) {
   const vals = Object.values(hist).flatMap(arr => arr.map(d => d.precio));
   if (!vals.length) return {};
   const mn = Math.min(...vals), mx = Math.max(...vals);
-  const rng = mx - mn || 1000;
-  const mag = Math.pow(10, Math.floor(Math.log10(rng / 5)));
+  const rng = mx - mn || mn * 0.1 || 1000;
+  // Step limpio basado en el rango real
+  const mag  = Math.pow(10, Math.floor(Math.log10(rng / 5)));
   const step = Math.ceil((rng / 5) / mag) * mag;
+  // Padding: 5% del valor mínimo real (nunca negativo, nunca exagerado)
+  const pad = Math.max(step, mn * 0.05);
+  const yMin = Math.max(0, Math.floor((mn - pad) / step) * step);
+  const yMax = Math.ceil((mx + pad) / step) * step;
   return {
-    min: Math.floor((mn - step * 0.5) / step) * step,
-    max: Math.ceil((mx  + step * 0.5) / step) * step,
+    min: yMin,
+    max: yMax,
     ticks: { stepSize: step, color:'#4a6a8a', font:{family:'DM Sans'}, callback: v => fmtAxis(v), maxTicksLimit: 7 }
   };
 }
