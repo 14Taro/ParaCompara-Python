@@ -922,8 +922,10 @@ def index():
 
 if __name__ == "__main__":
     init_db()
+    import os
+    port = int(os.environ.get("PORT", 8080))
     print("\n" + "="*50)
     print("  Para&Compara corriendo en:")
-    print("  http://localhost:8080")
+    print(f"  http://localhost:{port}")
     print("="*50 + "\n")
-    app.run(host="0.0.0.0", port=8080, debug=False)
+    app.run(host="0.0.0.0", port=port, debug=False)
