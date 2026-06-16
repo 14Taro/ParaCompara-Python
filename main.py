@@ -380,7 +380,7 @@ footer strong{color:var(--acc);}
   <section class="hero">
     <div class="hero-tag">⚡ Comparador de precios en tiempo real</div>
     <h1>Compra <em>inteligente</em>,<br>ahorra de verdad</h1>
-    <p>Éxito · Jumbo · D1 · Ara · Olímpica<br>Buscá por nombre, marca o categoría.</p>
+    <p>Éxito · Jumbo · D1 · Olímpica<br>Buscá por nombre, marca o categoría.</p>
   </section>
 
   <div class="main-tabs">
